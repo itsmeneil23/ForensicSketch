@@ -29,21 +29,35 @@ export default function IdentifyPage() {
     }
   };
 
-  const handleAnalyze = () => {
-    if (!file) return;
+  const handleAnalyze = async () => {
 
-    setIsAnalyzing(true);
-    
-    // Simulate processing time
-    setTimeout(() => {
-      setIsAnalyzing(false);
-      setResults(MOCK_RESULTS);
-      toast({
-        title: "Analysis Complete",
-        description: "5 Matches Found in Database",
-      });
-    }, 3000);
-  };
+  if(!file) return;
+
+  setIsAnalyzing(true);
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const uploadRes = await fetch("/api/upload",{
+    method:"POST",
+    body:formData
+  });
+
+  const uploadData = await uploadRes.json();
+
+  const resultRes = await fetch("/api/identify",{
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body:JSON.stringify({ path:uploadData.path })
+  });
+
+  const data = await resultRes.json();
+
+  setResults(data);
+
+  setIsAnalyzing(false);
+
+};
 
   const handleSave = (criminal: Criminal) => {
     toast({
