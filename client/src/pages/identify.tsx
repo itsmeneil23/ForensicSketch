@@ -17,6 +17,8 @@ export default function IdentifyPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<Criminal[] | null>(null);
+  const hasResults = !!results && results.length > 0;
+  const hasNoMatches = !!results && results.length === 0;
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -31,33 +33,53 @@ export default function IdentifyPage() {
 
   const handleAnalyze = async () => {
 
-  if(!file) return;
+    if (!file) return;
 
-  setIsAnalyzing(true);
+    setIsAnalyzing(true);
 
-  const formData = new FormData();
-  formData.append("file", file);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
 
-  const uploadRes = await fetch("/api/upload",{
-    method:"POST",
-    body:formData
-  });
+      const uploadRes = await fetch("/api/upload", {
+        method: "POST",
+        body: formData
+      });
 
-  const uploadData = await uploadRes.json();
+      if (!uploadRes.ok) {
+        throw new Error("Upload failed");
+      }
 
-  const resultRes = await fetch("/api/identify",{
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body:JSON.stringify({ path:uploadData.path })
-  });
+      const uploadData = await uploadRes.json();
 
-  const data = await resultRes.json();
+      if (!uploadData?.path) {
+        throw new Error("Upload succeeded but no file path was returned");
+      }
 
-  setResults(data);
+      const resultRes = await fetch("/api/identify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: uploadData.path })
+      });
 
-  setIsAnalyzing(false);
+      if (!resultRes.ok) {
+        throw new Error("Identification failed");
+      }
 
-};
+      const data = await resultRes.json();
+      setResults(Array.isArray(data) ? data : []);
+    } catch (error) {
+      setResults([]);
+      toast({
+        title: "Identification Error",
+        description: error instanceof Error ? error.message : "Failed to identify sketch.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
+
+  };
 
   const handleSave = (criminal: Criminal) => {
     toast({
@@ -148,7 +170,8 @@ export default function IdentifyPage() {
                   <p>&gt; OPTIMIZING_RESULTS...</p>
                 </>
               )}
-              {results && <p>&gt; SEARCH_COMPLETE: 5 MATCHES FOUND</p>}
+              {hasResults && <p>&gt; SEARCH_COMPLETE: {results.length} MATCHES FOUND</p>}
+              {hasNoMatches && <p>&gt; SEARCH_COMPLETE: NO MATCHES FOUND</p>}
               <span className="animate-pulse">_</span>
             </div>
           </div>
@@ -169,14 +192,14 @@ export default function IdentifyPage() {
               </motion.div>
             )}
 
-            {results && (
+            {hasResults && (
               <motion.div 
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 className="space-y-6"
               >
                 <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-display font-bold text-white">TOP 5 MATCHES</h2>
+                  <h2 className="text-xl font-display font-bold text-white">TOP MATCHES</h2>
                   <div className="text-xs font-mono text-primary">SORTED BY: CONFIDENCE_SCORE</div>
                 </div>
 
@@ -267,6 +290,18 @@ export default function IdentifyPage() {
                   ))}
                 </div>
 
+              </motion.div>
+            )}
+
+            {hasNoMatches && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="h-full flex flex-col items-center justify-center text-center p-12 border border-dashed border-muted-foreground/20 rounded-lg"
+              >
+                <AlertTriangle className="w-16 h-16 text-destructive/40 mb-4" />
+                <h3 className="text-2xl font-display text-muted-foreground">NO MATCHES FOUND</h3>
+                <p className="text-muted-foreground/70 font-tech">Try another sketch or a clearer input image.</p>
               </motion.div>
             )}
           </AnimatePresence>

@@ -58,6 +58,7 @@ export default function GeneratePage() {
 
   const download = () => {
     const dataURL = fabricCanvas.current?.toDataURL({
+      multiplier: 1,
       format: "png",
     });
 

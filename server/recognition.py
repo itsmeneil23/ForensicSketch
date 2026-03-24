@@ -8,12 +8,15 @@ from skimage.feature import hog
 from sklearn.metrics.pairwise import cosine_similarity
 
 # -------- Paths --------
-BASE = os.getcwd()
+BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 train_path = os.path.join(BASE, "client/public/project/module2_face_rec/train")
 gallery_path = os.path.join(BASE, "client/public/project/module2_face_rec/gallery")
 
 predictor_path = os.path.join(BASE, "server/shape_predictor_68_face_landmarks.dat")
+DEFAULT_ALPHA = 0.5
+DEFAULT_GEOM_WEIGHTS = np.array([0.25, 0.25, 0.25, 0.25])
+TRAIN_BOOST_FACTOR = 0.15
 
 # -------- Models --------
 detector = dlib.get_frontal_face_detector()
@@ -56,6 +59,9 @@ def hog_feat(img):
 
 
 def extract_all(img):
+    if img is None or img.size == 0:
+        return None
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     faces = detector(gray)
 
@@ -82,8 +88,95 @@ def extract_all(img):
     return comps, geom
 
 
+def combined_similarity(s_hog, s_geom, g_hog, g_geom, alpha, geom_weights):
+    app = np.mean([
+        cosine_similarity([a], [b])[0][0]
+        for a, b in zip(s_hog, g_hog)
+    ])
+
+    geom_dist = np.sum(geom_weights * np.abs(s_geom - g_geom))
+    geom = 1 / (1 + geom_dist)
+
+    return alpha * app + (1 - alpha) * geom
+
+
+def build_gallery_features():
+    gallery = []
+
+    if not os.path.isdir(gallery_path):
+        return gallery
+
+    for file in os.listdir(gallery_path):
+        img = cv2.imread(os.path.join(gallery_path, file))
+        r = extract_all(img)
+
+        if r is None:
+            continue
+
+        comps, geom = r
+        gallery.append((file, [hog_feat(c) for c in comps], geom))
+
+    return gallery
+
+
+def build_train_identity_mapping(gallery, alpha, geom_weights):
+    identity_refs = []
+
+    if not os.path.isdir(train_path):
+        return identity_refs
+
+    for person in os.listdir(train_path):
+        p_dir = os.path.join(train_path, person)
+        sketch_img = cv2.imread(os.path.join(p_dir, "sketch.png"))
+        sketch_res = extract_all(sketch_img)
+
+        if sketch_res is None:
+            continue
+
+        s_comps, s_geom = sketch_res
+        s_hog = [hog_feat(c) for c in s_comps]
+
+        photo_feats = []
+        for file in os.listdir(p_dir):
+            if "photo" not in file:
+                continue
+
+            img = cv2.imread(os.path.join(p_dir, file))
+            photo_res = extract_all(img)
+
+            if photo_res is None:
+                continue
+
+            p_comps, p_geom = photo_res
+            photo_feats.append(([hog_feat(c) for c in p_comps], p_geom))
+
+        if len(photo_feats) == 0:
+            continue
+
+        best_gallery_name = None
+        best_gallery_score = -1
+
+        for g_name, g_hog, g_geom in gallery:
+            local_best = max(
+                combined_similarity(ph, pg, g_hog, g_geom, alpha, geom_weights)
+                for ph, pg in photo_feats
+            )
+
+            if local_best > best_gallery_score:
+                best_gallery_score = local_best
+                best_gallery_name = g_name
+
+        if best_gallery_name is not None:
+            identity_refs.append((person, s_hog, s_geom, best_gallery_name))
+
+    return identity_refs
+
+
 # -------- TRAINING PHASE --------
 def learn_parameters():
+
+    if not os.path.isdir(train_path):
+        return DEFAULT_ALPHA, DEFAULT_GEOM_WEIGHTS
 
     training_pairs = []
 
@@ -123,7 +216,10 @@ def learn_parameters():
 
             training_pairs.append((s_hog, s_geom, g_hog, g_geom, person))
 
-    best_alpha = 0
+    if len(training_pairs) == 0:
+        return DEFAULT_ALPHA, DEFAULT_GEOM_WEIGHTS
+
+    best_alpha = DEFAULT_ALPHA
     best_acc = 0
 
     for alpha in np.arange(0, 1.1, 0.1):
@@ -160,6 +256,9 @@ def learn_parameters():
     for sh, sg, gh, gg, _ in training_pairs:
         geom_diffs.append(np.abs(sg - gg))
 
+    if len(geom_diffs) == 0:
+        return best_alpha, DEFAULT_GEOM_WEIGHTS
+
     geom_weights = 1 / (np.mean(geom_diffs, axis=0) + 1e-6)
     geom_weights /= np.sum(geom_weights)
 
@@ -181,35 +280,30 @@ def run_identification(test_path):
     s_comps, s_geom = s_res
     s_hog = [hog_feat(c) for c in s_comps]
 
-    gallery = []
+    gallery = build_gallery_features()
 
-    for file in os.listdir(gallery_path):
+    if len(gallery) == 0:
+        return []
 
-        img = cv2.imread(os.path.join(gallery_path, file))
+    train_identity_refs = build_train_identity_mapping(gallery, best_alpha, geom_weights)
 
-        r = extract_all(img)
+    nearest_identity = None
+    nearest_identity_sim = 0
 
-        if r is None:
-            continue
-
-        comps, geom = r
-
-        gallery.append((file, [hog_feat(c) for c in comps], geom))
+    for person, t_hog, t_geom, mapped_gallery in train_identity_refs:
+        sim = combined_similarity(s_hog, s_geom, t_hog, t_geom, 0.7, geom_weights)
+        if sim > nearest_identity_sim:
+            nearest_identity_sim = sim
+            nearest_identity = (person, mapped_gallery)
 
     results = []
 
     for name, gh, gg in gallery:
 
-        app = np.mean([
-            cosine_similarity([a], [b])[0][0]
-            for a, b in zip(s_hog, gh)
-        ])
+        score = combined_similarity(s_hog, s_geom, gh, gg, best_alpha, geom_weights)
 
-        geom_dist = np.sum(geom_weights * np.abs(s_geom - gg))
-
-        geom = 1 / (1 + geom_dist)
-
-        score = best_alpha * app + (1 - best_alpha) * geom
+        if nearest_identity is not None and nearest_identity[1] == name:
+            score += TRAIN_BOOST_FACTOR * nearest_identity_sim
 
         results.append((name, score))
 
